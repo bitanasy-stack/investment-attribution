@@ -66,6 +66,7 @@ def analyze(prices, assets, capital=100000, risk_free=0.02):
     stat['基准收益率'] = benchmark.iloc[-1] / capital - 1
     stat['超额收益率'] = stat['累计收益率'] - stat['基准收益率']
     return {'curve': pd.concat([portfolio, benchmark], axis=1),
+            'prices': p.copy(),
             'drawdown': portfolio / portfolio.cummax() - 1,
             'contribution': pd.DataFrame(rows), 'metrics': stat,
             'observations': len(p), 'start': str(p.index[0].date()), 'end': str(p.index[-1].date())}

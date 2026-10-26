@@ -10,6 +10,7 @@ from core import analyze, narrative, validate_assets
 from data_source import load
 from allocation import TEMPLATES, editor_frame, parse_frame, preview
 from tushare_source import get_token
+from historical_comparison import build_comparisons
 
 DATA_MODES = ['离线演示', '在线行情', '本地行情缓存', 'Tushare行情', 'Tushare缓存']
 
@@ -44,6 +45,8 @@ def result_panel(result, config, name, notes):
     st.subheader(name + ' · 分析结果')
     st.caption(f"{result['start']} → {result['end']} ｜ {result['observations']} 个共同观测日 ｜ {config['mode']}")
     m = result['metrics']
+    if config.get('construction'):
+        st.info('本组合按同一历史区间的已知收益事后筛选。展示结果含前视偏差，不是样本外回测，也不是未来收益预测。')
     cols = st.columns(4)
     for c, label in zip(cols, ['累计收益率', '超额收益率', '最大回撤', '年化波动率']):
         c.metric(label, show_percent(m[label]))
@@ -75,6 +78,8 @@ def result_panel(result, config, name, notes):
         for note in notes:
             st.caption(note)
     text = narrative(result, config['mode'])
+    if config.get('construction'):
+        text += ' 本组合按同区间已知收益事后筛选，存在前视偏差，不是可事先实现的策略回测。'
     report = '<!doctype html><meta charset="utf-8"><title>组合分析报告</title>'
     report += '<style>body{font-family:Microsoft YaHei,sans-serif;max-width:1000px;margin:40px auto;line-height:1.8}table{border-collapse:collapse}td,th{padding:8px;border:1px solid #ddd}</style>'
     report += '<h1>' + html.escape(name) + '</h1><p>' + html.escape(text) + '</p>'
@@ -87,6 +92,44 @@ def result_panel(result, config, name, notes):
     b.download_button('下载收益贡献 CSV', result['contribution'].to_csv(index=False).encode('utf-8-sig'),
                       '收益贡献.csv', 'text/csv')
     c.download_button('下载每日资产 CSV', result['curve'].to_csv().encode('utf-8-sig'), '每日资产.csv', 'text/csv')
+
+
+def historical_panel(result, config, name):
+    if config['mode']=='离线演示':
+        return
+    st.divider()
+    st.subheader('从本次真实结果生成两个历史对照组合')
+    st.caption(f"候选池仅限“{name}”已经分析的资产，使用 {result['start']} 至 {result['end']} 同一份行情，不另外请求数据。")
+    st.write('前三项集中对照按35%、35%、30%配置；前五项等权对照每项20%。先看计算结果，再保存到你的账户。')
+    st.info('这是已知结果后的教学对照，含前视偏差。收益更高不等于回撤更小，也不能说明当时可以提前选中。')
+    try:
+        outputs,table=build_comparisons(result,config,name)
+    except ValueError as e:
+        st.caption(str(e))
+        return
+    st.dataframe(table.style.format({k:('{:.2f}' if k=='夏普比率' else '{:.2%}')
+        for k in result['metrics']}),hide_index=True,width='stretch')
+    for output in outputs:
+        with st.expander(output['name']):
+            st.write(f"本区间累计收益 {output['result']['metrics']['累计收益率']:.2%}，比原组合高 {output['uplift']*100:.2f} 个百分点。")
+            frame=editor_frame(output['config']['assets'])
+            frame['配置金额 元']=frame['比例 %']/100*config['capital']
+            st.dataframe(frame.style.format({'比例 %':'{:.2f}','配置金额 元':'{:,.2f}'}),hide_index=True,width='stretch')
+    st.download_button('下载两个历史对照的配置 JSON',
+        json.dumps([dict(name=o['name'],config=o['config']) for o in outputs],ensure_ascii=False,indent=2).encode('utf-8'),
+        '历史对照组合配置.json','application/json')
+    if st.button('将两个历史对照保存到我的账户',type='primary'):
+        existing={r['name'] for r in db.portfolios(st.session_state.uid)}
+        created=[]
+        for output in outputs:
+            if output['name'] in existing:
+                continue
+            db.save_portfolio(st.session_state.uid,output['name'],output['config'])
+            db.save_analysis(st.session_state.uid,output['name'],output['config'],output['result'])
+            created.append(output['name'])
+        st.session_state['comparison_defaults']=[name]+[o['name'] for o in outputs]
+        st.session_state['comparison_period']=dict(start=result['start'],end=result['end'],mode=config['mode'])
+        st.success(f'已新增 {len(created)} 个历史对照组合（同名组合保留不覆盖）。在侧栏点击多组合对比，即可与原组合按本次区间比较。')
 
 
 if 'uid' not in st.session_state:
@@ -238,6 +281,7 @@ if page == '组合分析':
             st.error(str(e))
     if 'last' in st.session_state:
         result_panel(*st.session_state['last'])
+        historical_panel(*st.session_state['last'][:3])
     if chosen != '新建组合':
         with st.expander('删除当前组合'):
             confirmed = st.checkbox('确认删除此组合配置，历史分析记录保留')
@@ -249,12 +293,16 @@ if page == '组合分析':
 elif page == '多组合对比':
     st.subheader('同一时段，同一数据模式，公平比较')
     options = {r['name']: json.loads(r['config']) for r in saved}
-    selected = st.multiselect('选择 2～5 个已保存组合', list(options), default=list(options)[:3], max_selections=5)
+    preferred=[n for n in st.session_state.get('comparison_defaults',[]) if n in options]
+    selected = st.multiselect('选择 2～5 个已保存组合', list(options), default=preferred[:5] or list(options)[:3], max_selections=5)
+    period=st.session_state.get('comparison_period',dict(start='2024-01-02',end='2024-12-31',mode='离线演示'))
     a, b, c = st.columns(3)
-    start = a.date_input('统一开始日期', date(2024,1,2))
-    end = b.date_input('统一结束日期', date(2024,12,31))
-    mode = c.selectbox('统一数据模式', DATA_MODES)
+    start = a.date_input('统一开始日期', date.fromisoformat(period['start']))
+    end = b.date_input('统一结束日期', date.fromisoformat(period['end']))
+    mode = c.selectbox('统一数据模式', DATA_MODES,index=DATA_MODES.index(period['mode']))
     st.caption('统一按 10 万元归一化，按全部资产和基准共同日期计算。无风险利率固定 2%。')
+    if any(options[n].get('construction') for n in selected):
+        st.info('所选组合包含按同一历史区间事后筛选的教学对照。与原组合的收益差异包含前视偏差，不代表样本外能力。')
     if st.button('比较组合', type='primary'):
         try:
             if len(selected) < 2:
