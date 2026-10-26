@@ -1,0 +1,62 @@
+"""教学配置模板及权重预览，不包含投资推荐或收益预测。"""
+import pandas as pd
+
+
+def assets(rows):
+    return [dict(kind=k,code=c,name=n,weight=w/100,sector=s,role=r)
+            for k,c,n,w,s,r in rows]
+
+
+TEMPLATES = {
+ '多行业股票组合 10项': assets([
+    ('股票','600519','贵州茅台',12,'消费','核心'),
+    ('股票','600036','招商银行',12,'金融','核心'),
+    ('股票','601318','中国平安',10,'金融','核心'),
+    ('股票','000333','美的集团',10,'消费','核心'),
+    ('股票','600900','长江电力',10,'公用事业','核心'),
+    ('股票','300750','宁德时代',10,'新能源','卫星'),
+    ('股票','601012','隆基绿能',8,'新能源','卫星'),
+    ('股票','600276','恒瑞医药',8,'医药','卫星'),
+    ('股票','600887','伊利股份',10,'消费','核心'),
+    ('股票','601088','中国神华',10,'能源','核心')]),
+ '股票基金混合组合 8项': assets([
+    ('股票','600519','贵州茅台',12,'消费','核心'),
+    ('股票','600036','招商银行',12,'金融','核心'),
+    ('股票','601318','中国平安',10,'金融','核心'),
+    ('股票','000333','美的集团',10,'消费','核心'),
+    ('股票','600900','长江电力',8,'公用事业','核心'),
+    ('股票','300750','宁德时代',8,'新能源','卫星'),
+    ('基金','110011','基金110011',20,'主动基金','核心'),
+    ('基金','161725','基金161725',20,'主题基金','卫星')]),
+ '核心卫星股票组合 6项': assets([
+    ('股票','600036','招商银行',25,'金融','核心'),
+    ('股票','600900','长江电力',20,'公用事业','核心'),
+    ('股票','600519','贵州茅台',20,'消费','核心'),
+    ('股票','300750','宁德时代',15,'新能源','卫星'),
+    ('股票','600276','恒瑞医药',10,'医药','卫星'),
+    ('股票','601012','隆基绿能',10,'新能源','卫星')])}
+
+
+def editor_frame(items):
+    return pd.DataFrame([{'类型':a['kind'],'代码':a['code'],'名称':a['name'],
+                         '行业 / 策略':a.get('sector','未分类'),
+                         '配置角色':a.get('role','核心'),'比例 %':round(a['weight']*100,8)} for a in items])
+
+
+def parse_frame(frame):
+    def label(value, fallback):
+        return fallback if pd.isna(value) or not str(value).strip() else str(value).strip()
+    return [dict(kind=str(r['类型']),code=str(r['代码']).strip(),name=label(r['名称'],str(r['代码'])),
+                 sector=label(r.get('行业 / 策略'),'未分类'),role=label(r.get('配置角色'),'核心'),
+                 weight=float(r['比例 %'])/100) for r in frame.to_dict('records')]
+
+
+def preview(frame, capital):
+    data = frame.copy()
+    data['比例 %'] = pd.to_numeric(data['比例 %'],errors='coerce')
+    data['配置金额 元'] = capital * data['比例 %']/100
+    total = data['比例 %'].sum()
+    return data,dict(total=total,unallocated=capital*(100-total)/100,
+                     largest=data['比例 %'].max() if len(data) else 0,
+                     stock=data.loc[data['类型']=='股票','比例 %'].sum(),
+                     fund=data.loc[data['类型']=='基金','比例 %'].sum())

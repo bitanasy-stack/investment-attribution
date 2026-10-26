@@ -1,13 +1,15 @@
 """运行方式：python -m streamlit run app.py"""
 import html
 import json
-from datetime import date
+from datetime import date, timedelta
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 import storage as db
 from core import analyze, narrative, validate_assets
 from data_source import load
+from allocation import TEMPLATES, editor_frame, parse_frame, preview
+from tushare_source import get_token
 
 DATA_MODES = ['离线演示', '在线行情', '本地行情缓存', 'Tushare行情', 'Tushare缓存']
 
@@ -138,7 +140,7 @@ with st.sidebar:
     if st.button('退出登录', width='stretch'):
         st.session_state.clear()
         st.rerun()
-    st.caption('本地教学应用 · 无真实交易')
+    st.caption('组合分析教学应用 · 无真实交易')
 
 st.title('投资决策归因器')
 st.caption('股票 × 基金 ｜ 组合表现 · 收益贡献 · 基准对比')
@@ -148,34 +150,74 @@ saved = db.portfolios(uid)
 if page == '组合分析':
     options = {r['name']: r for r in saved}
     chosen = st.selectbox('打开已保存组合', ['新建组合'] + list(options))
-    cfg = json.loads(options[chosen]['config']) if chosen != '新建组合' else default_config(EXAMPLES['均衡组合'])
+    if chosen == '新建组合':
+        template = st.selectbox('配置模板', list(TEMPLATES) + ['离线教学组合 3项'])
+        if template == '离线教学组合 3项':
+            cfg = default_config(EXAMPLES['均衡组合'])
+        else:
+            try:
+                get_token()
+                preferred_mode = 'Tushare行情'
+            except ValueError:
+                preferred_mode = '在线行情'
+            cfg = dict(assets=TEMPLATES[template],start=str(date.today()-timedelta(days=365)),
+                       end=str(date.today()),capital=100000,risk_free=.02,mode=preferred_mode)
+        st.caption('模板权重仅用于功能演示，可自行修改，不代表投资建议。行业和配置角色是可编辑教学标签，不是实时分类，也不代表基金穿透持仓。')
+    else:
+        cfg = json.loads(options[chosen]['config'])
+        template = ''
     # key 按组合区分，使切换组合立即显示对应配置。
-    key = str(options[chosen]['id']) if chosen != '新建组合' else 'new'
-    with st.form('config_' + key):
+    key = str(options[chosen]['id']) if chosen != '新建组合' else 'new_' + template
+    with st.container(border=True):
         a, b, c = st.columns([2, 1, 1])
-        name = a.text_input('组合名称', value=chosen if chosen != '新建组合' else '我的组合')
-        capital = b.number_input('初始本金 元', min_value=100.0, value=float(cfg['capital']), step=1000.0)
-        mode = c.selectbox('数据模式', DATA_MODES, index=DATA_MODES.index(cfg['mode']))
+        name = a.text_input('组合名称', value=chosen if chosen != '新建组合' else template,key='name_'+key)
+        capital = b.number_input('初始本金 元', min_value=100.0, value=float(cfg['capital']), step=1000.0,key='capital_'+key)
+        mode = c.selectbox('数据模式', DATA_MODES, index=DATA_MODES.index(cfg['mode']),key='mode_'+key)
         st.caption('Tushare模式：股票日线与复权因子、沪深300由Tushare提供；基金继续使用东方财富净值。需要服务端Token和相应接口权限。历史日线不等于盘中实时行情。')
         a, b, c = st.columns(3)
-        start = a.date_input('开始日期', date.fromisoformat(cfg['start']))
-        end = b.date_input('结束日期', date.fromisoformat(cfg['end']))
-        rf = c.number_input('年化无风险利率 %', min_value=0.0, max_value=20.0, value=cfg['risk_free']*100, step=.1)
-        st.caption('双击单元格编辑；底部加号增加资产。代码必须六位，名称为自定义标签，不会自动校验证券名称。')
-        frame = pd.DataFrame([{'类型':a['kind'], '代码':a['code'], '名称':a['name'], '比例 %':a['weight']*100} for a in cfg['assets']])
+        start = a.date_input('开始日期', date.fromisoformat(cfg['start']),key='start_'+key)
+        end = b.date_input('结束日期', date.fromisoformat(cfg['end']),key='end_'+key)
+        rf = c.number_input('年化无风险利率 %', min_value=0.0, max_value=20.0, value=cfg['risk_free']*100, step=.1,key='rf_'+key)
+        st.subheader('资产明细与配置权重')
+        st.caption('可增加或删除资产；编辑后权重与配置金额自动更新。代码为六位，名称为自定义标签，不会自动校验证券名称。')
+        frame = editor_frame(cfg['assets'])
         edited = st.data_editor(frame, num_rows='dynamic', hide_index=True, width='stretch',
+            key='editor_'+key,
             column_config={'类型':st.column_config.SelectboxColumn(options=['股票', '基金'], required=True),
                            '代码':st.column_config.TextColumn(required=True, max_chars=6),
+                           '配置角色':st.column_config.SelectboxColumn(options=['核心','卫星'],required=True),
                            '比例 %':st.column_config.NumberColumn(min_value=.01, max_value=100.0, required=True)})
+        allocation, summary = preview(edited, capital)
+        a,b,c,d = st.columns(4)
+        a.metric('资产数量',str(len(allocation)))
+        b.metric('权重合计',f"{summary['total']:.2f}%")
+        c.metric('股票 / 基金',f"{summary['stock']:.0f}% / {summary['fund']:.0f}%")
+        d.metric('最大单项权重',f"{summary['largest']:.2f}%")
+        if abs(summary['total']-100) > 1e-6:
+            st.warning(f"权重须合计100%。当前待配置金额：¥{summary['unallocated']:,.2f}（负数表示超配）；不自动归一化。")
+        else:
+            st.success(f'权重合计100%，已分配本金 ¥{capital:,.2f}。')
+        if summary['largest']>30:
+            st.info('单项资产权重大于30%，请留意集中度；这是配置提示，不是风险评级。')
+        with st.expander('查看配置金额与资产分布',expanded=True):
+            st.dataframe(allocation.style.format({'比例 %':'{:.2f}','配置金额 元':'{:,.2f}'}),hide_index=True,width='stretch')
+            valid = allocation[allocation['比例 %'].notna() & (allocation['比例 %']>0)].copy()
+            if not valid.empty:
+                valid['展示标签'] = valid['名称'].fillna(valid['代码']).astype(str)+' · '+valid['代码'].astype(str)
+                a,b = st.columns(2)
+                with a:
+                    st.plotly_chart(px.pie(valid,names='展示标签',values='比例 %',hole=.5,title='单项资产分布'),width='stretch')
+                with b:
+                    grouped = valid.groupby('行业 / 策略',dropna=False)['比例 %'].sum().reset_index()
+                    st.plotly_chart(px.bar(grouped,x='行业 / 策略',y='比例 %',title='教学分类分布'),width='stretch')
+                st.caption('图表按当前正权重占比展示；权重未达100%时仍需修正才能分析。基金分类不等于底层行业暴露。')
         st.caption('假设：期初买入后持有，允许虚拟份额，不含交易费用。离线数据覆盖 2024 年工作日，并非真实交易日历。')
         a, b = st.columns(2)
-        save = a.form_submit_button('保存组合配置', width='stretch')
-        run = b.form_submit_button('开始分析并保存记录', type='primary', width='stretch')
+        save = a.button('保存组合配置', width='stretch')
+        run = b.button('开始分析并保存记录', type='primary', width='stretch')
     if save or run:
         try:
-            assets = [{'kind':str(r['类型']), 'code':str(r['代码']).strip(),
-                       'name':'' if pd.isna(r['名称']) else str(r['名称']), 'weight':float(r['比例 %'])/100}
-                      for r in edited.to_dict('records')]
+            assets = parse_frame(edited)
             validate_assets(assets)
             if start >= end:
                 raise ValueError('开始日期必须早于结束日期。')
