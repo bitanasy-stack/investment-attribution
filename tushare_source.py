@@ -1,6 +1,7 @@
 """Tushare Pro 股票日线适配。令牌仅从服务端环境或 Streamlit secrets 读取。"""
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 import pandas as pd
@@ -21,17 +22,42 @@ def get_token():
 
 
 def query(api_name, params, fields, token):
-    try:
-        response = requests.post('https://api.tushare.pro', json={
-            'api_name':api_name, 'token':token, 'params':params, 'fields':fields},
-            timeout=(5, 25), allow_redirects=False)
-        response.raise_for_status()
-        payload = response.json()
-    except (requests.RequestException, ValueError):
-        raise ValueError(f'Tushare {api_name} 连接失败，请稍后重试。') from None
-    if payload.get('code') != 0:
-        # 不输出服务端原始响应，避免意外包含认证信息。
-        raise ValueError(f'Tushare {api_name} 调用未成功。请检查 Token、接口权限与调用频率；不自动替换为模拟数据。')
+    problem='连接异常'
+    for attempt in range(3):
+        try:
+            response = requests.post('https://api.tushare.pro', json={
+                'api_name':api_name, 'token':token, 'params':params, 'fields':fields},
+                timeout=(5, 18), allow_redirects=False)
+            response.raise_for_status()
+            if 300 <= response.status_code < 400:
+                raise ValueError('unexpected redirect')
+            payload = response.json()
+            if not isinstance(payload,dict):
+                raise ValueError('unexpected response')
+        except requests.Timeout:
+            problem='请求超时'
+        except requests.HTTPError as err:
+            status=err.response.status_code if err.response is not None else None
+            if status is not None and status not in (408,429,500,502,503,504):
+                raise ValueError(f'Tushare {api_name} HTTP响应异常（{status}），请检查服务状态或配置。') from None
+            problem=f'上游HTTP异常（{status}）'
+        except requests.RequestException:
+            problem='网络连接异常'
+        except ValueError:
+            problem='接口未返回有效JSON数据'
+        else:
+            if payload.get('code') == 0:
+                break
+            message=str(payload.get('msg') or '')
+            if any(word in message for word in ('频率','频次','每分钟','稍后','繁忙')):
+                problem='达到接口调用频率或上游服务繁忙'
+            else:
+                # 不回显完整响应或令牌；权限和认证失败不反复请求。
+                raise ValueError(f'Tushare {api_name} 调用未成功，请检查Token及该接口权限。未替换为模拟数据。') from None
+        if attempt < 2:
+            time.sleep(1+attempt)
+    else:
+        raise ValueError(f'Tushare {api_name} {problem}，已尝试3次。若此前同一区间分析成功，可切换“Tushare缓存”；否则稍后重试。') from None
     data = payload.get('data') or {}
     frame = pd.DataFrame(data.get('items') or [], columns=data.get('fields') or [])
     if not frame.empty and not set(fields.split(',')).issubset(frame.columns):
@@ -101,7 +127,18 @@ def load(assets, start, end, cached=False):
         filename = f'{"stock" if kind=="股票" else "fund" if kind=="基金" else "index"}_{code}_{str(start)}_{str(end)}'
         path = cache / (filename + '.csv')
         meta = cache / (filename + '.json')
-        if cached:
+        fresh=False
+        if not cached and path.exists() and meta.exists():
+            try:
+                fetched=json.loads(meta.read_text(encoding='utf-8'))['fetched_at']
+                age=(datetime.now(timezone.utc)-datetime.fromisoformat(fetched)).total_seconds()
+                fresh=0 <= age <= 900
+                if fresh:
+                    candidate=pd.read_csv(path,index_col=0,parse_dates=True)
+                    fresh=len(candidate)>=3 and candidate.iloc[:,0].notna().all() and (candidate.iloc[:,0]>0).all()
+            except (ValueError,KeyError,TypeError,OSError):
+                fresh=False
+        if cached or fresh:
             if not path.exists() or not meta.exists():
                 raise ValueError(f'{key} 在该日期区间没有Tushare模式缓存，请先完成在线分析。')
             s = pd.read_csv(path,index_col=0,parse_dates=True).iloc[:,0].rename(key)
@@ -111,7 +148,8 @@ def load(assets, start, end, cached=False):
             info = dict(source=source, fetched_at=datetime.now(timezone.utc).isoformat())
             s.to_frame().to_csv(path)
             meta.write_text(json.dumps(info,ensure_ascii=False),encoding='utf-8')
-        notes.append(f"{key}：{info['source']}；获取时间 {info['fetched_at']}")
+        reuse='；复用15分钟内同区间缓存' if fresh else ('；手动选择历史缓存' if cached else '')
+        notes.append(f"{key}：{info['source']}；获取时间 {info['fetched_at']}{reuse}")
         series.append(s)
     combined = pd.concat(series,axis=1).loc[pd.Timestamp(start):pd.Timestamp(end)]
     common = combined.dropna()
