@@ -11,6 +11,7 @@ from data_source import load
 from allocation import TEMPLATES, editor_frame, parse_frame, preview
 from tushare_source import get_token
 from historical_comparison import build_comparisons
+from contribution_view import breakdown, style_table, static_html, COLORS
 
 DATA_MODES = ['离线演示', '在线行情', '本地行情缓存', 'Tushare行情', 'Tushare缓存']
 
@@ -62,14 +63,31 @@ def result_panel(result, config, name, notes):
         fig.update_layout(yaxis_tickformat='.1%', legend_title_text='')
         st.plotly_chart(fig, width='stretch')
     with t2:
-        c = result['contribution']
-        fig = px.bar(c, x='资产', y='收益贡献', color='类型',
-                     color_discrete_map={'股票': '#167d9a', '基金': '#e7a23b'})
-        fig.update_layout(yaxis_tickformat='.1%')
+        c,detail,split = breakdown(result,config['capital'])
+        st.subheader('整个投资期的静态收益拆分')
+        st.caption(f"{result['start']} 至 {result['end']}，按期初权重买入并持有。红色为正贡献，绿色为负贡献，灰色为持平。")
+        a,b,d=st.columns(3)
+        a.metric('正贡献合计',f"{split['positive']*100:+.2f} 个百分点")
+        b.metric('负贡献合计',f"{split['negative']*100:+.2f} 个百分点")
+        d.metric('正负相抵后的净贡献',f"{split['net']*100:+.2f} 个百分点")
+        st.write(f"正贡献 {split['positive_count']} 项，负贡献 {split['negative_count']} 项，持平 {split['flat_count']} 项；合计盈亏 ¥{split['profit']:+,.2f}。")
+        c['贡献标签']=c['贡献 百分点'].map(lambda v:f'{v:+.2f} 个百分点')
+        fig = px.bar(c,x='贡献 百分点',y='显示名称',orientation='h',color='方向',
+                     text='贡献标签',color_discrete_map=COLORS,
+                     category_orders={'显示名称':c['显示名称'].tolist(),'方向':['正贡献','负贡献','持平']})
+        fig.update_traces(textposition='outside',cliponaxis=False)
+        fig.update_layout(height=max(340,len(c)*42+100),xaxis_title='对组合收益的贡献 百分点',
+                          yaxis_title='',margin=dict(l=10,r=135,t=20,b=40))
+        fig.add_vline(x=0,line_color='#8895a7',line_width=1)
         st.plotly_chart(fig, width='stretch')
-        st.dataframe(c.style.format({'初始权重':'{:.1%}', '资产收益率':'{:.2%}',
-            '收益贡献':'{:.2%}', '盈亏金额':'{:,.2f}', '期末市值':'{:,.2f}'}), hide_index=True, width='stretch')
-        st.caption('收益贡献以组合初始本金为分母，正负贡献之和等于组合累计收益率。')
+        st.markdown('**逐项拆分明细**')
+        st.table(style_table(detail))
+        st.caption('自身涨跌幅看资产本身；贡献百分点看它对整个组合的影响。贡献百分点＝期初比例×自身涨跌幅百分数。正负贡献之和等于组合收益；总数使用未四舍五入数据，显示值可能有尾差。')
+        st.write('例如：一只股票占本金20%，投资期上涨10%，它对组合贡献的是+2个百分点；10万元本金对应盈利2000元。')
+        st.download_button('下载静态收益拆分报告 HTML',static_html(result,config,name,notes).encode('utf-8'),
+                           '投资期逐项收益拆分.html','text/html')
+        st.download_button('下载详细收益拆分 CSV',detail.to_csv(index=False).encode('utf-8-sig'),
+                           '投资期逐项收益拆分.csv','text/csv')
     with t3:
         fig = px.area(result['drawdown'].rename('回撤'), labels={'value':'回撤', 'index':'日期'})
         fig.update_layout(yaxis_tickformat='.1%', showlegend=False)
