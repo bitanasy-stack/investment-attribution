@@ -1,6 +1,7 @@
 """运行方式：python -m streamlit run app.py"""
 import html
 import json
+import importlib
 from datetime import date, timedelta
 import pandas as pd
 import plotly.express as px
@@ -8,7 +9,11 @@ import streamlit as st
 import storage as db
 from core import analyze, narrative, validate_assets
 from data_source import load
-from allocation import TEMPLATES, editor_frame, parse_frame, preview
+import allocation as allocation_module
+# Streamlit可能继续保留已经导入的配置模块；模板不含运行时状态，重新加载安全。
+allocation_module=importlib.reload(allocation_module)
+TEMPLATES=allocation_module.TEMPLATES
+editor_frame,parse_frame,preview=allocation_module.editor_frame,allocation_module.parse_frame,allocation_module.preview
 from tushare_source import get_token
 from historical_comparison import build_comparisons
 from contribution_view import breakdown, style_table, static_html, COLORS
@@ -212,6 +217,10 @@ if page == '组合分析':
     options = {r['name']: r for r in saved}
     chosen = st.selectbox('打开已保存组合', ['新建组合'] + list(options))
     if chosen == '新建组合':
+        st.caption(f"当前已加载 {len(TEMPLATES)} 个真实资产模板；科技模板{'已就绪' if '科技主题组合 8项' in TEMPLATES else '尚未加载，请检查部署的allocation.py'}。")
+        if st.button('重新加载配置模板'):
+            importlib.invalidate_caches()
+            st.rerun()
         template = st.selectbox('配置模板', list(TEMPLATES) + ['离线教学组合 3项'])
         if template == '离线教学组合 3项':
             cfg = default_config(EXAMPLES['均衡组合'])
