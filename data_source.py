@@ -46,6 +46,21 @@ def fetch_series(kind, code):
     return s
 
 
+def demo_prices():
+    """Reproduce bundled synthetic data in memory when deployment omits the CSV."""
+    import numpy as np
+    rng = np.random.default_rng(20241026)
+    dates = pd.bdate_range('2024-01-02', '2024-12-31')
+    market = rng.normal(.00035, .009, len(dates))
+    specs = [('股票:600519',1700,.0003,.010,.9), ('股票:000001',10,.0001,.008,.7),
+             ('基金:110011',2.5,.00025,.005,.65), ('基金:161725',1.2,-.00015,.009,1.0),
+             ('基准:000300',3500,0,.002,1.0)]
+    data = {}
+    for key, initial, mu, sigma, beta in specs:
+        data[key] = initial * np.exp(np.cumsum(beta * market + mu + rng.normal(0, sigma, len(dates))))
+    return pd.DataFrame(data, index=dates)
+
+
 def load(assets, start, end, mode):
     if mode in ('Tushare行情', 'Tushare缓存'):
         from tushare_source import load as load_tushare
@@ -53,10 +68,17 @@ def load(assets, start, end, mode):
     keys = [a['kind'] + ':' + a['code'] for a in assets] + ['基准:000300']
     notes = []
     if mode == '离线演示':
-        df = pd.read_csv(ROOT / 'data' / 'demo_prices.csv', index_col=0, parse_dates=True)
+        path = ROOT / 'data' / 'demo_prices.csv'
+        try:
+            df = pd.read_csv(path, index_col=0, parse_dates=True)
+        except FileNotFoundError:
+            df = demo_prices()
+            notes.append('随附演示文件缺失，已在内存中重建相同固定种子的合成教学数据。')
         missing = set(keys) - set(df.columns)
         if missing:
             raise ValueError('离线模式仅支持随附四项示例资产，请使用示例组合。缺少：' + ', '.join(sorted(missing)))
+        if pd.Timestamp(start) > df.index.max() or pd.Timestamp(end) < df.index.min():
+            raise ValueError('离线演示仅覆盖 2024-01-02 至 2024-12-31，请修改日期；分析其他年份请切换在线行情或使用对应真实行情缓存。')
         notes.append('合成教学数据，固定随机种子生成，不是真实历史行情；代码仅用于演示输入。')
     else:
         series = []
